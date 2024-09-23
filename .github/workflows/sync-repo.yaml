@@ -16,3 +16,4 @@ jobs:
       - run: gh repo sync $REPO
         env:
           REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
