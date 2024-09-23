@@ -28,12 +28,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/google/go-containerregistry/internal/compare"
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/crane"
 	"github.com/google/go-containerregistry/pkg/name"
 	"github.com/google/go-containerregistry/pkg/registry"
 	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/compare"
 	"github.com/google/go-containerregistry/pkg/v1/empty"
 	"github.com/google/go-containerregistry/pkg/v1/mutate"
 	"github.com/google/go-containerregistry/pkg/v1/random"
@@ -401,11 +401,7 @@ func TestCraneSaveLegacy(t *testing.T) {
 func TestCraneSaveOCI(t *testing.T) {
 	t.Parallel()
 	// Write an image as an OCI image layout.
-	tmp, err := os.MkdirTemp("", "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.RemoveAll(tmp)
+	tmp := t.TempDir()
 
 	img, err := random.Image(1024, 5)
 	if err != nil {
@@ -553,9 +549,6 @@ func TestBadInputs(t *testing.T) {
 		{"Tag(invalid, invalid)", crane.Tag(invalid, invalid)},
 		{"Tag(404, invalid)", crane.Tag(valid404, invalid)},
 		{"Tag(404, 404)", crane.Tag(valid404, valid404)},
-		{"Optimize(invalid, invalid)", crane.Optimize(invalid, invalid, []string{})},
-		{"Optimize(404, invalid)", crane.Optimize(valid404, invalid, []string{})},
-		{"Optimize(404, 404)", crane.Optimize(valid404, valid404, []string{})},
 		// These return multiple values, which are hard to use as expressions.
 		{"Pull(invalid)", e(crane.Pull(invalid))},
 		{"Digest(invalid)", e(crane.Digest(invalid))},

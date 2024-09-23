@@ -20,58 +20,16 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-containerregistry/pkg/name"
 )
 
 var (
 	testRegistry, _ = name.NewRegistry("localhost:8080", name.StrictValidation)
 )
-
-func TestChallengeParsing(t *testing.T) {
-	tests := []struct {
-		input  string
-		output map[string]string
-	}{{
-		input: `foo="bar"`,
-		output: map[string]string{
-			"foo": "bar",
-		},
-	}, {
-		input: `foo`,
-		output: map[string]string{
-			"foo": "",
-		},
-	}, {
-		input: `foo="bar",baz="blah"`,
-		output: map[string]string{
-			"foo": "bar",
-			"baz": "blah",
-		},
-	}, {
-		input: `baz="blah", foo="bar"`,
-		output: map[string]string{
-			"foo": "bar",
-			"baz": "blah",
-		},
-	}, {
-		input: `realm="https://gcr.io/v2/token", service="gcr.io", scope="repository:foo/bar:pull"`,
-		output: map[string]string{
-			"realm":   "https://gcr.io/v2/token",
-			"service": "gcr.io",
-			"scope":   "repository:foo/bar:pull",
-		},
-	}}
-
-	for _, test := range tests {
-		params := parseChallenge(test.input)
-		if diff := cmp.Diff(test.output, params); diff != "" {
-			t.Errorf("parseChallenge(%s); (-want +got) %s", test.input, diff)
-		}
-	}
-}
 
 func TestPingNoChallenge(t *testing.T) {
 	server := httptest.NewServer(
@@ -85,15 +43,15 @@ func TestPingNoChallenge(t *testing.T) {
 		},
 	}
 
-	pr, err := ping(context.Background(), testRegistry, tprt)
+	pr, err := Ping(context.Background(), testRegistry, tprt)
 	if err != nil {
 		t.Errorf("ping() = %v", err)
 	}
-	if pr.challenge != anonymous {
-		t.Errorf("ping(); got %v, want %v", pr.challenge, anonymous)
+	if pr.Scheme != "" {
+		t.Errorf("ping(); got %v, want %v", pr.Scheme, "")
 	}
-	if pr.scheme != "http" {
-		t.Errorf("ping(); got %v, want %v", pr.scheme, "http")
+	if !pr.Insecure {
+		t.Errorf("ping(); got %v, want %v", pr.Insecure, true)
 	}
 }
 
@@ -110,14 +68,14 @@ func TestPingBasicChallengeNoParams(t *testing.T) {
 		},
 	}
 
-	pr, err := ping(context.Background(), testRegistry, tprt)
+	pr, err := Ping(context.Background(), testRegistry, tprt)
 	if err != nil {
 		t.Errorf("ping() = %v", err)
 	}
-	if pr.challenge != basic {
-		t.Errorf("ping(); got %v, want %v", pr.challenge, basic)
+	if pr.Scheme != "basic" {
+		t.Errorf("ping(); got %v, want %v", pr.Scheme, "basic")
 	}
-	if got, want := len(pr.parameters), 0; got != want {
+	if got, want := len(pr.Parameters), 0; got != want {
 		t.Errorf("ping(); got %v, want %v", got, want)
 	}
 }
@@ -135,14 +93,14 @@ func TestPingBearerChallengeWithParams(t *testing.T) {
 		},
 	}
 
-	pr, err := ping(context.Background(), testRegistry, tprt)
+	pr, err := Ping(context.Background(), testRegistry, tprt)
 	if err != nil {
 		t.Errorf("ping() = %v", err)
 	}
-	if pr.challenge != bearer {
-		t.Errorf("ping(); got %v, want %v", pr.challenge, bearer)
+	if pr.Scheme != "bearer" {
+		t.Errorf("ping(); got %v, want %v", pr.Scheme, "bearer")
 	}
-	if got, want := len(pr.parameters), 1; got != want {
+	if got, want := len(pr.Parameters), 1; got != want {
 		t.Errorf("ping(); got %v, want %v", got, want)
 	}
 }
@@ -161,14 +119,14 @@ func TestPingMultipleChallenges(t *testing.T) {
 		},
 	}
 
-	pr, err := ping(context.Background(), testRegistry, tprt)
+	pr, err := Ping(context.Background(), testRegistry, tprt)
 	if err != nil {
 		t.Errorf("ping() = %v", err)
 	}
-	if pr.challenge != basic {
-		t.Errorf("ping(); got %v, want %v", pr.challenge, basic)
+	if pr.Scheme != "basic" {
+		t.Errorf("ping(); got %v, want %v", pr.Scheme, "basic")
 	}
-	if got, want := len(pr.parameters), 1; got != want {
+	if got, want := len(pr.Parameters), 1; got != want {
 		t.Errorf("ping(); got %v, want %v", got, want)
 	}
 }
@@ -187,12 +145,12 @@ func TestPingMultipleNotSupportedChallenges(t *testing.T) {
 		},
 	}
 
-	pr, err := ping(context.Background(), testRegistry, tprt)
+	pr, err := Ping(context.Background(), testRegistry, tprt)
 	if err != nil {
 		t.Errorf("ping() = %v", err)
 	}
-	if pr.challenge != "negotiate" {
-		t.Errorf("ping(); got %v, want %v", pr.challenge, "negotiate")
+	if pr.Scheme != "negotiate" {
+		t.Errorf("ping(); got %v, want %v", pr.Scheme, "negotiate")
 	}
 }
 
@@ -209,7 +167,7 @@ func TestUnsupportedStatus(t *testing.T) {
 		},
 	}
 
-	pr, err := ping(context.Background(), testRegistry, tprt)
+	pr, err := Ping(context.Background(), testRegistry, tprt)
 	if err == nil {
 		t.Errorf("ping() = %v", pr)
 	}
@@ -218,7 +176,7 @@ func TestUnsupportedStatus(t *testing.T) {
 func TestPingHttpFallback(t *testing.T) {
 	tests := []struct {
 		reg       name.Registry
-		wantCount int
+		wantCount int64
 		err       string
 		contains  []string
 	}{{
@@ -234,10 +192,15 @@ func TestPingHttpFallback(t *testing.T) {
 		contains:  []string{"https://us.gcr.io/v2/", "http://us.gcr.io/v2/"},
 	}}
 
-	gotCount := 0
+	gotCount := int64(0)
 	server := httptest.NewServer(
 		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			gotCount++
+			atomic.AddInt64(&gotCount, 1)
+			if r.URL.Scheme != "http" {
+				// Sleep a little bit so we can exercise the
+				// happy eyeballs race.
+				time.Sleep(5 * time.Millisecond)
+			}
 			w.WriteHeader(http.StatusOK)
 		}))
 	defer server.Close()
@@ -248,13 +211,15 @@ func TestPingHttpFallback(t *testing.T) {
 		},
 	}
 
+	fallbackDelay = 2 * time.Millisecond
+
 	for _, test := range tests {
 		// This is the last one, fatal error it.
 		if strings.Contains(test.reg.String(), "us.gcr.io") {
 			server.Close()
 		}
 
-		_, err := ping(context.Background(), test.reg, tprt)
+		_, err := Ping(context.Background(), test.reg, tprt)
 		if got, want := gotCount, test.wantCount; got != want {
 			t.Errorf("%s: got %d requests, wanted %d", test.reg.String(), got, want)
 		}

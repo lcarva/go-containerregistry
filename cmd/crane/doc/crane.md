@@ -28,12 +28,14 @@ crane [flags]
 * [crane digest](crane_digest.md)	 - Get the digest of an image
 * [crane export](crane_export.md)	 - Export filesystem of a container image as a tarball
 * [crane flatten](crane_flatten.md)	 - Flatten an image's layers into a single layer
+* [crane index](crane_index.md)	 - Modify an image index.
 * [crane ls](crane_ls.md)	 - List the tags in a repo
 * [crane manifest](crane_manifest.md)	 - Get the manifest of an image
 * [crane mutate](crane_mutate.md)	 - Modify image labels and annotations. The container must be pushed to a registry, and the manifest is updated there.
 * [crane pull](crane_pull.md)	 - Pull remote images by reference and store their contents locally
 * [crane push](crane_push.md)	 - Push local image contents to a remote registry
 * [crane rebase](crane_rebase.md)	 - Rebase an image onto a new base image
+* [crane registry](crane_registry.md)	 - 
 * [crane tag](crane_tag.md)	 - Efficiently tag a remote image
 * [crane validate](crane_validate.md)	 - Validate that an image is well-formed
 * [crane version](crane_version.md)	 - Print the version

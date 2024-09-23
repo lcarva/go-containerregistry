@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 
 	"github.com/google/go-containerregistry/pkg/name"
 )
@@ -53,11 +54,7 @@ func TestMain(m *testing.M) {
 func setupConfigDir(t *testing.T) string {
 	tmpdir := os.Getenv("TEST_TMPDIR")
 	if tmpdir == "" {
-		var err error
-		tmpdir, err = os.MkdirTemp("", "keychain_test")
-		if err != nil {
-			t.Fatalf("creating temp dir: %v", err)
-		}
+		tmpdir = t.TempDir()
 	}
 
 	fresh++
@@ -95,31 +92,31 @@ func TestNoConfig(t *testing.T) {
 	}
 }
 
+func writeConfig(t *testing.T, dir, file, content string) {
+	if err := os.MkdirAll(dir, 0777); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, file), []byte(content), 0600); err != nil {
+		t.Fatalf("write %q: %v", file, err)
+	}
+}
+
 func TestPodmanConfig(t *testing.T) {
 	tmpdir := os.Getenv("TEST_TMPDIR")
 	if tmpdir == "" {
-		var err error
-		tmpdir, err = os.MkdirTemp("", "keychain_test")
-		if err != nil {
-			t.Fatalf("creating temp dir: %v", err)
-		}
+		tmpdir = t.TempDir()
 	}
 	fresh++
+
+	os.Unsetenv("DOCKER_CONFIG")
+	// At first, $DOCKER_CONFIG is unset and $HOME/.docker/config.json isn't
+	// found, but Podman auth $XDG_RUNTIME_DIR/containers/auth.json is configured.
+	// This should return Podman's auth $XDG_RUNTIME_DIR/containers/auth.json.
 	p := filepath.Join(tmpdir, fmt.Sprintf("%d", fresh))
 	t.Setenv("XDG_RUNTIME_DIR", p)
-	os.Unsetenv("DOCKER_CONFIG")
-	if err := os.MkdirAll(filepath.Join(p, "containers"), 0777); err != nil {
-		t.Fatalf("mkdir %s/containers: %v", p, err)
-	}
-	cfg := filepath.Join(p, "containers/auth.json")
-	content := fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`, encode("foo", "bar"))
-	if err := os.WriteFile(cfg, []byte(content), 0600); err != nil {
-		t.Fatalf("write %q: %v", cfg, err)
-	}
-
-	// At first, $DOCKER_CONFIG is unset and $HOME/.docker/config.json isn't
-	// found, but Podman auth is configured. This should return Podman's
-	// auth.
+	writeConfig(t, filepath.Join(p, "containers"), "auth.json",
+		fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`,
+			encode("XDG_RUNTIME_DIR-foo", "XDG_RUNTIME_DIR-bar")))
 	auth, err := DefaultKeychain.Resolve(testRegistry)
 	if err != nil {
 		t.Fatalf("Resolve() = %v", err)
@@ -129,8 +126,30 @@ func TestPodmanConfig(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := &AuthConfig{
-		Username: "foo",
-		Password: "bar",
+		Username: "XDG_RUNTIME_DIR-foo",
+		Password: "XDG_RUNTIME_DIR-bar",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+
+	// Then, configure Podman auth $REGISTRY_AUTH_FILE.
+	// This demonstrates that $REGISTRY_AUTH_FILE is preferred over $XDG_RUNTIME_DIR/containers/auth.json.
+	t.Setenv("REGISTRY_AUTH_FILE", filepath.Join(p, "auth.json"))
+	writeConfig(t, p, "auth.json",
+		fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`,
+			encode("REGISTRY_AUTH_FILE-foo", "REGISTRY_AUTH_FILE-bar")))
+	auth, err = DefaultKeychain.Resolve(testRegistry)
+	if err != nil {
+		t.Fatalf("Resolve() = %v", err)
+	}
+	got, err = auth.Authorization()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = &AuthConfig{
+		Username: "REGISTRY_AUTH_FILE-foo",
+		Password: "REGISTRY_AUTH_FILE-bar",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v, want %+v", got, want)
@@ -138,15 +157,9 @@ func TestPodmanConfig(t *testing.T) {
 
 	// Now, configure $HOME/.docker/config.json, which should override
 	// Podman auth and be used.
-	if err := os.MkdirAll(filepath.Join(os.Getenv("HOME"), ".docker"), 0777); err != nil {
-		t.Fatalf("mkdir $HOME/.docker: %v", err)
-	}
-	cfg = filepath.Join(os.Getenv("HOME"), ".docker/config.json")
-	content = fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`, encode("home-foo", "home-bar"))
-	if err := os.WriteFile(cfg, []byte(content), 0600); err != nil {
-		t.Fatalf("write %q: %v", cfg, err)
-	}
-	defer func() { os.Remove(cfg) }()
+	writeConfig(t, filepath.Join(os.Getenv("HOME"), ".docker"), "config.json",
+		fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`, encode("home-foo", "home-bar")))
+	defer func() { os.Remove(filepath.Join(os.Getenv("HOME"), ".docker/config.json")) }()
 	auth, err = DefaultKeychain.Resolve(testRegistry)
 	if err != nil {
 		t.Fatalf("Resolve() = %v", err)
@@ -167,7 +180,7 @@ func TestPodmanConfig(t *testing.T) {
 	// auth configured.
 	// This demonstrates that DOCKER_CONFIG is preferred over Podman auth
 	// and $HOME/.docker/config.json.
-	content = fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`, encode("another-foo", "another-bar"))
+	content := fmt.Sprintf(`{"auths": {"test.io": {"auth": %q}}}`, encode("another-foo", "another-bar"))
 	cd := setupConfigFile(t, content)
 	defer os.RemoveAll(filepath.Dir(cd))
 
@@ -195,11 +208,12 @@ func encode(user, pass string) string {
 
 func TestVariousPaths(t *testing.T) {
 	tests := []struct {
-		desc    string
-		content string
-		wantErr bool
-		target  Resource
-		cfg     *AuthConfig
+		desc      string
+		content   string
+		wantErr   bool
+		target    Resource
+		cfg       *AuthConfig
+		anonymous bool
 	}{{
 		desc:    "invalid config file",
 		target:  testRegistry,
@@ -264,6 +278,17 @@ func TestVariousPaths(t *testing.T) {
 			Username: "foo",
 			Password: "bar",
 		},
+	}, {
+		desc:   "ignore unrelated repo",
+		target: testRepo,
+		content: fmt.Sprintf(`{
+  "auths": {
+    "test.io/another-repo": {"auth": %q},
+	"test.io": {}
+  }
+}`, encode("bar", "baz")),
+		cfg:       &AuthConfig{},
+		anonymous: true,
 	}}
 
 	for _, test := range tests {
@@ -291,6 +316,10 @@ func TestVariousPaths(t *testing.T) {
 
 			if !reflect.DeepEqual(cfg, test.cfg) {
 				t.Errorf("got %+v, want %+v", cfg, test.cfg)
+			}
+
+			if test.anonymous != (auth == Anonymous) {
+				t.Fatalf("unexpected anonymous authenticator")
 			}
 		})
 	}
@@ -380,5 +409,57 @@ func TestConfigFileIsADir(t *testing.T) {
 	}
 	if auth != Anonymous {
 		t.Errorf("expected Anonymous, got %v", auth)
+	}
+}
+
+type fakeKeychain struct {
+	auth Authenticator
+	err  error
+
+	count int
+}
+
+func (k *fakeKeychain) Resolve(_ Resource) (Authenticator, error) {
+	k.count++
+	return k.auth, k.err
+}
+
+func TestRefreshingAuth(t *testing.T) {
+	repo := name.MustParseReference("example.com/my/repo").Context()
+	last := time.Now()
+
+	// Increments by 1 minute each invocation.
+	clock := func() time.Time {
+		last = last.Add(1 * time.Minute)
+		return last
+	}
+
+	want := AuthConfig{
+		Username: "foo",
+		Password: "secret",
+	}
+
+	keychain := &fakeKeychain{FromConfig(want), nil, 0}
+	rk := RefreshingKeychain(keychain, 5*time.Minute)
+	rk.(*refreshingKeychain).clock = clock
+
+	auth, err := rk.Resolve(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < 10; i++ {
+		got, err := auth.Authorization()
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if *got != want {
+			t.Errorf("got %+v, want %+v", got, want)
+		}
+	}
+
+	if got, want := keychain.count, 2; got != want {
+		t.Errorf("refreshed %d times, wanted %d", got, want)
 	}
 }

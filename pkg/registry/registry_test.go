@@ -15,8 +15,6 @@
 package registry_test
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -27,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/google/go-containerregistry/pkg/registry"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
 )
 
 const (
@@ -47,8 +46,8 @@ const (
 )
 
 func sha256String(s string) string {
-	h := sha256.Sum256([]byte(s))
-	return hex.EncodeToString(h[:])
+	h, _, _ := v1.SHA256(strings.NewReader(s))
+	return h.Hex
 }
 
 func TestCalls(t *testing.T) {
@@ -137,6 +136,42 @@ func TestCalls(t *testing.T) {
 			Code:        http.StatusOK,
 			Header:      map[string]string{"Docker-Content-Digest": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"},
 			Want:        "foo",
+		},
+		{
+			Description: "GET blob range",
+			Digests:     map[string]string{"sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae": "foo"},
+			Method:      "GET",
+			URL:         "/v2/foo/blobs/sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+			Code:        http.StatusPartialContent,
+			RequestHeader: map[string]string{
+				"Range": "bytes=1-2",
+			},
+			Header: map[string]string{
+				"Docker-Content-Digest": "sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+				"Content-Length":        "2",
+				"Content-Range":         "bytes 1-2/3",
+			},
+			Want: "oo",
+		},
+		{
+			Description: "GET invalid range header",
+			Digests:     map[string]string{"sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae": "foo"},
+			Method:      "GET",
+			URL:         "/v2/foo/blobs/sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+			RequestHeader: map[string]string{
+				"Range": "nibbles=123-456",
+			},
+			Code: http.StatusRequestedRangeNotSatisfiable,
+		},
+		{
+			Description: "GET bad blob range",
+			Digests:     map[string]string{"sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae": "foo"},
+			Method:      "GET",
+			URL:         "/v2/foo/blobs/sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae",
+			RequestHeader: map[string]string{
+				"Range": "bytes=1-3",
+			},
+			Code: http.StatusRequestedRangeNotSatisfiable,
 		},
 		{
 			Description: "HEAD blob",
@@ -438,6 +473,62 @@ func TestCalls(t *testing.T) {
 			URL:         "/v2/_catalog?n=1000",
 			Code:        http.StatusOK,
 		},
+		{
+			Description: "fetch references",
+			Method:      "GET",
+			URL:         "/v2/foo/referrers/sha256:" + sha256String("foo"),
+			Code:        http.StatusOK,
+			Manifests: map[string]string{
+				"foo/manifests/image":           "foo",
+				"foo/manifests/points-to-image": "{\"subject\": {\"digest\": \"sha256:" + sha256String("foo") + "\"}}",
+			},
+			Header: map[string]string{
+				"Content-Type": "application/vnd.oci.image.index.v1+json",
+			},
+		},
+		{
+			Description: "fetch references, subject pointing elsewhere",
+			Method:      "GET",
+			URL:         "/v2/foo/referrers/sha256:" + sha256String("foo"),
+			Code:        http.StatusOK,
+			Manifests: map[string]string{
+				"foo/manifests/image":           "foo",
+				"foo/manifests/points-to-image": "{\"subject\": {\"digest\": \"sha256:" + sha256String("nonexistant") + "\"}}",
+			},
+			Header: map[string]string{
+				"Content-Type": "application/vnd.oci.image.index.v1+json",
+			},
+		},
+		{
+			Description: "fetch references, no results",
+			Method:      "GET",
+			URL:         "/v2/foo/referrers/sha256:" + sha256String("foo"),
+			Code:        http.StatusOK,
+			Manifests: map[string]string{
+				"foo/manifests/image": "foo",
+			},
+			Header: map[string]string{
+				"Content-Type": "application/vnd.oci.image.index.v1+json",
+			},
+		},
+		{
+			Description: "fetch references, missing repo",
+			Method:      "GET",
+			URL:         "/v2/does-not-exist/referrers/sha256:" + sha256String("foo"),
+			Code:        http.StatusNotFound,
+		},
+		{
+			Description: "fetch references, bad target (tag vs. digest)",
+			Method:      "GET",
+			URL:         "/v2/foo/referrers/latest",
+			Code:        http.StatusBadRequest,
+		},
+		{
+			Description: "fetch references, bad method",
+			Method:      "POST",
+			URL:         "/v2/foo/referrers/sha256:" + sha256String("foo"),
+			Code:        http.StatusBadRequest,
+		},
 	}
 
 	for _, tc := range tcs {
@@ -445,10 +536,11 @@ func TestCalls(t *testing.T) {
 		var logger *log.Logger
 		testf := func(t *testing.T) {
 
-			r := registry.New()
+			opts := []registry.Option{registry.WithReferrersSupport(true)}
 			if logger != nil {
-				r = registry.New(registry.Logger(logger))
+				opts = append(opts, registry.Logger(logger))
 			}
+			r := registry.New(opts...)
 			s := httptest.NewServer(r)
 			defer s.Close()
 
